@@ -1,86 +1,81 @@
 package main
 
 import (
+    "bufio"
+    "context"
     "fmt"
-    "os" 
-    "time"
-    "sync" 
-    "encoding/csv"
     "github.com/parnurzeal/gorequest"
+    "os"
+    "sync"
+    "time"
 )
 
 const workersCount = 24
 
-func getUrlWorker(urlChan chan string) {
-    for url := range urlChan {
-        resp, body, errs := gorequest.New().Get(url).End()
-        _ = resp
-        _ = body
-        _ = errs
+func getUrlWorker(ctx context.Context, urlChan <-chan string, wg *sync.WaitGroup) {
+    defer wg.Done()
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case url, ok := <-urlChan:
+            if !ok {
+                return
+            }
+            resp, body, errs := gorequest.New().Get(url).End()
+            if len(errs) > 0 {
+                fmt.Printf("Error fetching %s: %v\n", url, errs)
+            } else {
+                _ = resp
+                _ = body
+            }
+        }
     }
 }
 
 func main() {
-
-    // Record start time.  Will be used for  
-    // detemine elapsed time once completed  
     start := time.Now()
 
-    // Open Alexa CSV file  
-    fmt.Println("Opening top-1m.csv file")
-    csvfile, err := os.Open("top-1m.csv")
+    txtfile, err := os.Open("top-1m.txt")
     if err != nil {
-        panic(err)
-    } else {
-        defer csvfile.Close()
+        fmt.Printf("Error opening file: %v\n", err)
+        return
     }
-     
-    // Read in CSV file
-    reader := csv.NewReader(csvfile)
-    reader.FieldsPerRecord = -1 
-    fmt.Println("  Reading Entries (May take a few seconds)")
-    rawCSVdata, err := reader.ReadAll()
-    if err != nil {
-        panic(err)
-    } else {
-        fmt.Println("  Completed!")
-    }
+    defer txtfile.Close()
 
-    // Start concurrency management 
+    scanner := bufio.NewScanner(txtfile)
+
+    urlChan := make(chan string, workersCount)
+    ctx, cancel := context.WithCancel(context.Background())
     var wg sync.WaitGroup
-    urlChan := make(chan string)
-
-    wg.Add(workersCount)
 
     for i := 0; i < workersCount; i++ {
-        go func() {
-            getUrlWorker(urlChan)
-            wg.Done()
-        }()
+        wg.Add(1)
+        go getUrlWorker(ctx, urlChan, &wg)
     }
 
     completed := 0
-    for _, each := range rawCSVdata {
-        url := fmt.Sprintf("http://%s", each[1]) 
-        urlChan <- url
+
+    for scanner.Scan() {
+        domain := scanner.Text()
+        url := fmt.Sprintf("http://%s", domain)
+        select {
+        case urlChan <- url:
+        case <-ctx.Done():
+            break
+        }
         completed++
         fmt.Printf("Completed %s (%d)\n", url, completed)
     }
+
+    if err := scanner.Err(); err != nil {
+        fmt.Printf("Error reading file: %v\n", err)
+    }
+
     close(urlChan)
-
     wg.Wait()
+    cancel()
 
-    // End summary
-    fmt.Println("Completed Tranactoins : ", completed)
-    fmt.Println("Time Elapsed          : ", time.Since(start))
-
+    fmt.Println("Completed Transactions:", completed)
+    fmt.Println("Time Elapsed:", time.Since(start))
 }
-
-
-
-
-
-
-
-
-
